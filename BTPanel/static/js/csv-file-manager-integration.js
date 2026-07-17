@@ -1,0 +1,686 @@
+/**
+ * CSV Editor File Manager Integration
+ * Extends existing file manager with CSV editing capabilities
+ * Supports custom delimiters (comma, tab, space) and .txt files
+ */
+
+const csvFileManagerIntegration = {
+    delimiter: ',',
+    delimiter_options: {
+        'comma': ',',
+        'tab': '\t',
+        'space': ' ',
+        'semicolon': ';',
+        'pipe': '|'
+    },
+    supported_extensions: ['csv', 'txt', 'tsv'],
+    
+    /**
+     * Initialize CSV file manager integration
+     */
+    init: function() {
+        this.extend_file_manager();
+        this.bind_file_events();
+    },
+    
+    /**
+     * Extend existing file manager with CSV support
+     */
+    extend_file_manager: function() {
+        const that = this;
+        
+        // Hook into file manager's file context menu
+        const original_render_menu = bt_file.render_file_groud_menu;
+        
+        if (typeof original_render_menu === 'function') {
+            bt_file.render_file_groud_menu = function(ev, el) {
+                const index = $(el).data('index');
+                const data = bt_file.file_list[index];
+                
+                // Add CSV edit option for supported file types
+                if (that.is_csv_file(data.ext) || that.is_csv_file(data.filename)) {
+                    if (!data.config) data.config = {};
+                    data.config.edit_csv = 'Edit in CSV Editor';
+                }
+                
+                // Call original function
+                original_render_menu.call(this, ev, el);
+            };
+        }
+        
+        // Hook into file double-click to open CSV files in editor
+        const original_file_groud_event = bt_file.file_groud_event;
+        
+        if (typeof original_file_groud_event === 'function') {
+            bt_file.file_groud_event = function(data) {
+                if (data.open === 'edit_csv') {
+                    csvFileManagerIntegration.open_csv_editor(data);
+                    return;
+                }
+                original_file_groud_event.call(this, data);
+            };
+        }
+    },
+    
+    /**
+     * Bind CSV file events
+     */
+    bind_file_events: function() {
+        const that = this;
+        
+        // Double-click CSV files
+        $(document).on('dblclick', '.file_list_content .file_tr', function(e) {
+            const index = $(this).data('index');
+            const data = bt_file.file_list[index];
+            
+            if (that.is_csv_file(data.ext) || that.is_csv_file(data.filename)) {
+                e.stopPropagation();
+                that.open_csv_editor(data);
+            }
+        });
+        
+        // Context menu for CSV files
+        $(document).on('contextmenu', '.file_list_content .file_tr', function(e) {
+            const index = $(this).data('index');
+            const data = bt_file.file_list[index];
+            
+            if (that.is_csv_file(data.ext) || that.is_csv_file(data.filename)) {
+                that.show_csv_file_menu(e, data);
+                e.preventDefault();
+            }
+        });
+    },
+    
+    /**
+     * Check if file is CSV-supported type
+     */
+    is_csv_file: function(filename_or_ext) {
+        if (!filename_or_ext) return false;
+        
+        const ext = filename_or_ext.toLowerCase().split('.').pop();
+        return this.supported_extensions.includes(ext);
+    },
+    
+    /**
+     * Show CSV-specific context menu for files
+     */
+    show_csv_file_menu: function(e, data) {
+        const that = this;
+        const x = e.clientX;
+        const y = e.clientY;
+        
+        const menu_html = `
+            <div class="csv_file_popup_menu ace_catalogue_menu" style="position: fixed; left: ${x}px; top: ${y}px; z-index: 99999;">
+                <ul class="csv_menu_list">
+                    <li class="csv_menu_item" data-action="open_csv_editor">
+                        <i class="glyphicon glyphicon-edit"></i>
+                        <span>Edit in CSV Editor</span>
+                    </li>
+                    <li class="csv_menu_item" data-action="open_text_editor">
+                        <i class="glyphicon glyphicon-pencil"></i>
+                        <span>Edit as Text</span>
+                    </li>
+                    <li class="csv_menu_divider"></li>
+                    <li class="csv_menu_item" data-action="csv_settings">
+                        <i class="glyphicon glyphicon-cog"></i>
+                        <span>CSV Settings...</span>
+                    </li>
+                    <li class="csv_menu_divider"></li>
+                    <li class="csv_menu_item" data-action="convert_format">
+                        <i class="glyphicon glyphicon-random"></i>
+                        <span>Convert Format...</span>
+                    </li>
+                </ul>
+            </div>
+        `;
+        
+        // Remove previous menu
+        $('.csv_file_popup_menu').remove();
+        
+        // Add new menu
+        $('body').append(menu_html);
+        
+        // Bind menu item click handlers
+        $('.csv_file_popup_menu .csv_menu_item[data-action]').on('click', function() {
+            const action = $(this).data('action');
+            
+            switch(action) {
+                case 'open_csv_editor':
+                    that.open_csv_editor(data);
+                    break;
+                case 'open_text_editor':
+                    openEditorView(0, data.path);
+                    break;
+                case 'csv_settings':
+                    that.show_csv_settings_dialog(data);
+                    break;
+                case 'convert_format':
+                    that.show_convert_dialog(data);
+                    break;
+            }
+            
+            $('.csv_file_popup_menu').remove();
+        });
+        
+        // Close menu on outside click
+        $(document).one('click', function() {
+            $('.csv_file_popup_menu').remove();
+        });
+    },
+    
+    /**
+     * Open CSV editor view
+     */
+    open_csv_editor: function(data) {
+        const that = this;
+        
+        // Show loading message
+        const loadT = bt.load('Loading CSV file...');
+        
+        // Load file content
+        bt.send('GetFileBody', 'files/GetFileBody', {
+            filename: data.path
+        }, function(res) {
+            loadT.close();
+            
+            if (!res.status) {
+                layer.msg('Failed to load file: ' + res.msg, { icon: 2 });
+                return;
+            }
+            
+            // Parse CSV content
+            that.show_csv_editor_dialog(data, res.data);
+        });
+    },
+    
+    /**
+     * Show CSV editor dialog
+     */
+    show_csv_editor_dialog: function(data, content) {
+        const that = this;
+        const delimiter_select = `
+            <select class="csv_delimiter_select bt-input-text" style="width: 150px;">
+                <option value="comma">Comma (,)</option>
+                <option value="tab">Tab (\\t)</option>
+                <option value="space">Space ( )</option>
+                <option value="semicolon">Semicolon (;)</option>
+                <option value="pipe">Pipe (|)</option>
+            </select>
+        `;
+        
+        const csv_table = this.parse_csv(content, this.delimiter);
+        const table_html = this.generate_table_html(csv_table);
+        
+        layer.open({
+            type: 1,
+            title: 'CSV Editor - [ ' + data.filename + ' ]',
+            area: ['95%', '90vh'],
+            maxmin: true,
+            shadeClose: false,
+            closeBtn: 2,
+            skin: 'csv_editor_view',
+            content: `
+                <div class="csv_editor_container" style="height: 100%; display: flex; flex-direction: column;">
+                    <div class="csv_editor_toolbar pd10" style="border-bottom: 1px solid #ddd; background: #fafafa;">
+                        <div style="display: flex; align-items: center; gap: 15px;">
+                            <span>Delimiter:</span>
+                            ${delimiter_select}
+                            <button class="btn btn-sm btn-default csv_refresh_btn">
+                                <i class="glyphicon glyphicon-refresh"></i> Refresh
+                            </button>
+                            <button class="btn btn-sm btn-success csv_save_btn">
+                                <i class="glyphicon glyphicon-save"></i> Save
+                            </button>
+                            <button class="btn btn-sm btn-info csv_export_btn">
+                                <i class="glyphicon glyphicon-download"></i> Export
+                            </button>
+                            <div style="flex: 1;"></div>
+                            <span style="font-size: 12px; color: #666;">
+                                Rows: <span class="csv_row_count">0</span> | Columns: <span class="csv_col_count">0</span>
+                            </span>
+                        </div>
+                    </div>
+                    <div class="csv_editor_main pd10" style="flex: 1; overflow: auto;">
+                        <div class="csv_table_wrapper">
+                            ${table_html}
+                        </div>
+                    </div>
+                </div>
+            `,
+            success: function(layero, index) {
+                // Bind delimiter change
+                $('.csv_delimiter_select').on('change', function() {
+                    that.delimiter = that.delimiter_options[$(this).val()];
+                    const new_table = that.parse_csv(content, that.delimiter);
+                    const new_html = that.generate_table_html(new_table);
+                    $('.csv_table_wrapper').html(new_html);
+                    that.update_table_stats();
+                    csvEditor.init();
+                });
+                
+                // Bind refresh button
+                $('.csv_refresh_btn').on('click', function() {
+                    const new_table = that.parse_csv(content, that.delimiter);
+                    const new_html = that.generate_table_html(new_table);
+                    $('.csv_table_wrapper').html(new_html);
+                    that.update_table_stats();
+                    csvEditor.init();
+                    layer.msg('Refreshed', { icon: 1 });
+                });
+                
+                // Bind save button
+                $('.csv_save_btn').on('click', function() {
+                    that.save_csv_file(data, layero, index);
+                });
+                
+                // Bind export button
+                $('.csv_export_btn').on('click', function() {
+                    that.show_export_options(data);
+                });
+                
+                // Initialize CSV editor
+                csvEditor.current_file = data.path;
+                csvEditor.init();
+                
+                // Update statistics
+                that.update_table_stats();
+            }
+        });
+    },
+    
+    /**
+     * Parse CSV content based on delimiter
+     */
+    parse_csv: function(content, delimiter) {
+        const lines = content.split('\n');
+        const table = [];
+        
+        lines.forEach(line => {
+            if (line.trim()) {
+                const row = this.parse_csv_line(line, delimiter);
+                table.push(row);
+            }
+        });
+        
+        return table;
+    },
+    
+    /**
+     * Parse single CSV line
+     */
+    parse_csv_line: function(line, delimiter) {
+        const cells = [];
+        let current_cell = '';
+        let in_quotes = false;
+        
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            const next_char = line[i + 1];
+            
+            if (char === '"') {
+                if (in_quotes && next_char === '"') {
+                    current_cell += '"';
+                    i++;
+                } else {
+                    in_quotes = !in_quotes;
+                }
+            } else if (char === delimiter && !in_quotes) {
+                cells.push(current_cell.trim());
+                current_cell = '';
+            } else {
+                current_cell += char;
+            }
+        }
+        
+        cells.push(current_cell.trim());
+        return cells;
+    },
+    
+    /**
+     * Generate HTML table from parsed CSV
+     */
+    generate_table_html: function(csv_table) {
+        if (csv_table.length === 0) return '<p>No data</p>';
+        
+        let html = '<table class="table csv_table" style="border-collapse: collapse; width: 100%;">';
+        
+        // Generate headers (first row)
+        if (csv_table.length > 0) {
+            html += '<thead><tr style="background-color: #f5f5f5;">';
+            csv_table[0].forEach((cell, index) => {
+                html += `<th style="border: 1px solid #ddd; padding: 10px; font-weight: bold; background-color: #f0f0f0;">
+                    <input type="text" value="${this.escape_html(cell)}" class="csv_header_cell" style="width: 100%; border: none; background: transparent; padding: 4px; font-weight: bold;">
+                </th>`;
+            });
+            html += '</tr></thead>';
+        }
+        
+        // Generate body rows
+        html += '<tbody>';
+        for (let i = 1; i < csv_table.length; i++) {
+            html += '<tr class="csv_row">';
+            csv_table[i].forEach((cell, col_index) => {
+                html += `<td class="csv_cell" style="border: 1px solid #eee; padding: 0;">
+                    <input type="text" value="${this.escape_html(cell)}" class="csv_input" style="width: 100%; border: none; padding: 8px; font-size: 13px;">
+                </td>`;
+            });
+            html += '</tr>';
+        }
+        html += '</tbody>';
+        html += '</table>';
+        
+        return html;
+    },
+    
+    /**
+     * Escape HTML characters
+     */
+    escape_html: function(text) {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    },
+    
+    /**
+     * Update table statistics
+     */
+    update_table_stats: function() {
+        const rows = $('.csv_table tbody tr').length;
+        const cols = $('.csv_table thead th').length;
+        
+        $('.csv_row_count').text(rows);
+        $('.csv_col_count').text(cols);
+    },
+    
+    /**
+     * Save CSV file
+     */
+    save_csv_file: function(data, layero, index) {
+        const that = this;
+        const csv_content = this.export_table_to_csv($('.csv_table'));
+        
+        bt.send('WriteFileBody', 'files/WriteFileBody', {
+            filename: data.path,
+            content: csv_content
+        }, function(res) {
+            if (res.status) {
+                layer.msg('File saved successfully', { icon: 1 });
+            } else {
+                layer.msg('Failed to save file: ' + res.msg, { icon: 2 });
+            }
+        });
+    },
+    
+    /**
+     * Export table to CSV format
+     */
+    export_table_to_csv: function(table_element, delimiter = null) {
+        if (!delimiter) delimiter = this.delimiter;
+        
+        const rows = [];
+        
+        table_element.find('tr').each(function() {
+            const cells = [];
+            $(this).find('th input, td input').each(function() {
+                const value = $(this).val();
+                // Quote if contains delimiter or quotes
+                if (value.includes(delimiter) || value.includes('"')) {
+                    cells.push('"' + value.replace(/"/g, '""') + '"');
+                } else {
+                    cells.push(value);
+                }
+            });
+            if (cells.length > 0) {
+                rows.push(cells.join(delimiter));
+            }
+        });
+        
+        return rows.join('\n');
+    },
+    
+    /**
+     * Show CSV settings dialog
+     */
+    show_csv_settings_dialog: function(data) {
+        const that = this;
+        
+        layer.open({
+            type: 1,
+            title: 'CSV Settings',
+            area: '400px',
+            closeBtn: 2,
+            content: `
+                <div class="bt-form pd20 pb70">
+                    <div class="line">
+                        <span class="tname">Delimiter</span>
+                        <div class="info-r">
+                            <select class="bt-input-text settings_delimiter" style="width: 100%;">
+                                <option value="comma" selected>Comma (,)</option>
+                                <option value="tab">Tab (\\t)</option>
+                                <option value="space">Space ( )</option>
+                                <option value="semicolon">Semicolon (;)</option>
+                                <option value="pipe">Pipe (|)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="line">
+                        <span class="tname">Encoding</span>
+                        <div class="info-r">
+                            <select class="bt-input-text settings_encoding" style="width: 100%;">
+                                <option value="utf-8" selected>UTF-8</option>
+                                <option value="gb2312">GB2312</option>
+                                <option value="gbk">GBK</option>
+                                <option value="iso-8859-1">ISO-8859-1</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="line">
+                        <span class="tname">Quote Character</span>
+                        <div class="info-r">
+                            <input type="text" class="bt-input-text settings_quote" value='"' maxlength="1" style="width: 100%;">
+                        </div>
+                    </div>
+                </div>
+            `,
+            btn: ['Save', 'Cancel'],
+            yes: function(index) {
+                that.delimiter = that.delimiter_options[$('.settings_delimiter').val()];
+                layer.close(index);
+                layer.msg('Settings saved', { icon: 1 });
+            }
+        });
+    },
+    
+    /**
+     * Show export options dialog
+     */
+    show_export_options: function(data) {
+        const that = this;
+        
+        layer.open({
+            type: 1,
+            title: 'Export Options',
+            area: '450px',
+            closeBtn: 2,
+            content: `
+                <div class="bt-form pd20 pb70">
+                    <div class="line">
+                        <span class="tname">Format</span>
+                        <div class="info-r">
+                            <select class="bt-input-text export_format" style="width: 100%;">
+                                <option value="csv">CSV</option>
+                                <option value="json">JSON</option>
+                                <option value="xlsx">Excel (XLSX)</option>
+                                <option value="html">HTML Table</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="line">
+                        <span class="tname">File Name</span>
+                        <div class="info-r">
+                            <input type="text" class="bt-input-text export_filename" value="${data.filename.split('.')[0]}" style="width: 100%;">
+                        </div>
+                    </div>
+                </div>
+            `,
+            btn: ['Export', 'Cancel'],
+            yes: function(index) {
+                const format = $('.export_format').val();
+                const filename = $('.export_filename').val();
+                
+                that.export_file(format, filename);
+                layer.close(index);
+            }
+        });
+    },
+    
+    /**
+     * Export file in specified format
+     */
+    export_file: function(format, filename) {
+        const table_element = $('.csv_table');
+        let content = '';
+        let mime_type = 'text/plain';
+        
+        switch(format) {
+            case 'csv':
+                content = this.export_table_to_csv(table_element);
+                mime_type = 'text/csv';
+                filename += '.csv';
+                break;
+            case 'json':
+                content = this.export_table_to_json(table_element);
+                mime_type = 'application/json';
+                filename += '.json';
+                break;
+            case 'html':
+                content = this.export_table_to_html(table_element);
+                mime_type = 'text/html';
+                filename += '.html';
+                break;
+        }
+        
+        // Download file
+        const blob = new Blob([content], { type: mime_type });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        
+        layer.msg('File exported: ' + filename, { icon: 1 });
+    },
+    
+    /**
+     * Export table to JSON
+     */
+    export_table_to_json: function(table_element) {
+        const headers = [];
+        const data = [];
+        
+        table_element.find('thead th input').each(function() {
+            headers.push($(this).val());
+        });
+        
+        table_element.find('tbody tr').each(function() {
+            const row = {};
+            $(this).find('td input').each((index) => {
+                row[headers[index]] = $(this).val();
+            });
+            data.push(row);
+        });
+        
+        return JSON.stringify(data, null, 2);
+    },
+    
+    /**
+     * Export table to HTML
+     */
+    export_table_to_html: function(table_element) {
+        const html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>CSV Data</title>
+    <style>
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f5f5f5; font-weight: bold; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+    </style>
+</head>
+<body>
+    ${table_element.prop('outerHTML')}
+</body>
+</html>
+        `;
+        
+        return html;
+    },
+    
+    /**
+     * Show convert format dialog
+     */
+    show_convert_dialog: function(data) {
+        const that = this;
+        
+        layer.open({
+            type: 1,
+            title: 'Convert File Format',
+            area: '450px',
+            closeBtn: 2,
+            content: `
+                <div class="bt-form pd20 pb70">
+                    <div class="line">
+                        <span class="tname">Current Format</span>
+                        <div class="info-r">
+                            <input type="text" class="bt-input-text" value="${data.ext.toUpperCase()}" disabled style="width: 100%;">
+                        </div>
+                    </div>
+                    <div class="line">
+                        <span class="tname">Convert To</span>
+                        <div class="info-r">
+                            <select class="bt-input-text convert_to_format" style="width: 100%;">
+                                <option value="csv">CSV</option>
+                                <option value="tsv">TSV (Tab-Separated)</option>
+                                <option value="txt">Text</option>
+                                <option value="json">JSON</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="line">
+                        <span class="tname">Source Delimiter (for TSV/CSV)</span>
+                        <div class="info-r">
+                            <select class="bt-input-text convert_source_delim" style="width: 100%;">
+                                <option value="comma">Comma (,)</option>
+                                <option value="tab">Tab (\\t)</option>
+                                <option value="space">Space ( )</option>
+                                <option value="semicolon">Semicolon (;)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            `,
+            btn: ['Convert', 'Cancel'],
+            yes: function(index) {
+                const target_format = $('.convert_to_format').val();
+                that.convert_file_format(data, target_format);
+                layer.close(index);
+            }
+        });
+    }
+};
+
+// Initialize on document ready
+$(document).ready(function() {
+    if (typeof csvFileManagerIntegration !== 'undefined') {
+        csvFileManagerIntegration.init();
+    }
+});
