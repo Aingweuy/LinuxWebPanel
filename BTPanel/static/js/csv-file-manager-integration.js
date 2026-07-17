@@ -687,6 +687,7 @@ const csvFileManagerIntegration = {
                                 <option value="tsv">TSV (Tab-Separated)</option>
                                 <option value="txt">Text</option>
                                 <option value="json">JSON</option>
+                                <option value="bytes">Bytes (.bytes) - Binary</option>
                             </select>
                         </div>
                     </div>
@@ -713,7 +714,7 @@ const csvFileManagerIntegration = {
     },
 
     /**
-     * Convert file format (CSV, TSV, TXT, JSON)
+     * Convert file format (CSV, TSV, TXT, JSON, Bytes)
      */
     convert_file_format: function(data, target_format) {
         const that = this;
@@ -736,6 +737,12 @@ const csvFileManagerIntegration = {
                 const csv_table = that.parse_csv(res.data, source_delim);
                 if (csv_table.length === 0) {
                     layer.msg('File is empty, nothing to convert', { icon: 0 });
+                    return;
+                }
+                
+                // ── Bytes conversion (binary) ───────────────────────
+                if (target_format === 'bytes') {
+                    that._convert_to_bytes(data, csv_table);
                     return;
                 }
                 
@@ -789,6 +796,153 @@ const csvFileManagerIntegration = {
                 layer.msg('Error during conversion: ' + err.message, { icon: 2 });
             }
         });
+    },
+
+    /**
+     * Internal: convert table data to .bytes and save
+     */
+    _convert_to_bytes: function(data, csv_table) {
+        const that = this;
+
+        if (csv_table.length < 2) {
+            layer.msg('Table must have at least a header row and one data row', { icon: 0 });
+            return;
+        }
+
+        if (typeof csvBytesConverter === 'undefined') {
+            layer.msg('Bytes converter module is not loaded', { icon: 2 });
+            return;
+        }
+
+        // Auto-detect column types
+        const headerRow = csv_table[0];
+        const dataRows = csv_table.slice(1);
+        const detectedTypes = [];
+        for (let c = 0; c < headerRow.length; c++) {
+            const colValues = dataRows.map(row => (c < row.length ? row[c] : ''));
+            detectedTypes.push(csvBytesConverter.inferColumnType(colValues));
+        }
+
+        // Show type configuration dialog
+        that._show_bytes_type_dialog(data, csv_table, headerRow, detectedTypes);
+    },
+
+    /**
+     * Show column type configuration dialog before bytes export
+     */
+    _show_bytes_type_dialog: function(data, csv_table, headerRow, detectedTypes) {
+        const that = this;
+        const typeNames = ['int', 'float', 'double', 'uint', 'long', 'string', 'bool', 'byte', 'short'];
+
+        let rows_html = '';
+        for (let i = 0; i < headerRow.length; i++) {
+            const detected = csvBytesConverter.getTypeName(detectedTypes[i]);
+            let options_html = '';
+            typeNames.forEach(function(tn) {
+                const sel = (tn === detected) ? ' selected' : '';
+                options_html += '<option value="' + tn + '"' + sel + '>' + tn + '</option>';
+            });
+            rows_html += '<tr>' +
+                '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + (headerRow[i] || 'col_' + i) + '</td>' +
+                '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' +
+                    '<select class="bt-input-text bytes_col_type" data-col="' + i + '" style="width:100%;padding:4px;">' + options_html + '</select>' +
+                '</td>' +
+                '</tr>';
+        }
+
+        layer.open({
+            type: 1,
+            title: 'Configure Column Types for .bytes Export',
+            area: ['520px', '480px'],
+            closeBtn: 2,
+            content: '<div class="bt-form pd20 pb70">' +
+                '<div style="margin-bottom:10px;color:#666;font-size:13px;">Auto-detected types are pre-selected. Adjust if needed before export.</div>' +
+                '<div style="max-height:320px;overflow-y:auto;border:1px solid #eee;border-radius:4px;">' +
+                '<table style="width:100%;border-collapse:collapse;">' +
+                '<thead><tr>' +
+                    '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;">Column</th>' +
+                    '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;">Data Type</th>' +
+                '</tr></thead>' +
+                '<tbody>' + rows_html + '</tbody>' +
+                '</table></div></div>',
+            btn: ['Export .bytes', 'Cancel'],
+            yes: function(index) {
+                // Collect user-selected types
+                const columnTypes = [];
+                for (let c = 0; c < headerRow.length; c++) {
+                    const selectedName = $('.bytes_col_type[data-col="' + c + '"]').val();
+                    columnTypes.push(csvBytesConverter.parseTypeName(selectedName));
+                }
+
+                layer.close(index);
+                that._execute_bytes_export(data, csv_table, columnTypes);
+            }
+        });
+    },
+
+    /**
+     * Execute .bytes export with given column types
+     */
+    _execute_bytes_export: function(data, csv_table, columnTypes) {
+        const that = this;
+
+        try {
+            const saveT = bt.load('Generating .bytes file...');
+
+            const bytesData = csvBytesConverter.convertTableToBytes(csv_table, {
+                columnTypes: columnTypes
+            });
+
+            // Build target path
+            const path_parts = data.path.split('.');
+            if (path_parts.length > 1) path_parts.pop();
+            const new_path = path_parts.join('.') + '.bytes';
+
+            // Encode binary as Base64 for transport
+            const base64Content = csvBytesConverter.uint8ArrayToBase64(bytesData);
+
+            // Save via panel API using base64 content
+            bt.send('WriteFileBody', 'files/WriteFileBody', {
+                filename: new_path,
+                content: base64Content,
+                encoding: 'base64'
+            }, function(save_res) {
+                saveT.close();
+                if (save_res.status) {
+                    layer.msg('Successfully exported to: ' + new_path + ' (' + bytesData.length + ' bytes)', { icon: 1 });
+                    if (typeof bt_file !== 'undefined' && typeof bt_file.get_list === 'function') {
+                        bt_file.get_list();
+                    }
+                } else {
+                    // Fallback: try writing as raw binary string
+                    that._save_bytes_fallback(new_path, bytesData, saveT);
+                }
+            });
+        } catch (err) {
+            layer.msg('Error generating .bytes: ' + err.message, { icon: 2 });
+        }
+    },
+
+    /**
+     * Fallback: save bytes by writing raw binary via Blob download
+     */
+    _save_bytes_fallback: function(filePath, bytesData, loadHandle) {
+        if (loadHandle) loadHandle.close();
+        try {
+            // Offer direct download as fallback
+            const blob = new Blob([bytesData], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filePath.split('/').pop();
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            layer.msg('File downloaded as: ' + a.download + ' (server save unavailable, downloaded to browser)', { icon: 1 });
+        } catch (err2) {
+            layer.msg('Failed to save .bytes file: ' + err2.message, { icon: 2 });
+        }
     },
 
     /**
