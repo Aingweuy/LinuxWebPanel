@@ -9,13 +9,13 @@
  *     [int32 totalSize] [int32 recordCount]
  *     [bool hasStringSeq]
  *     [pool: strings] [pool: ints] [pool: uints] [pool: longs] [pool: floats] [pool: doubles]
- *     [int32 indexBufferCount] [int32[] indexBuffer]
+ *     [ushort indexBufferCount] [ushort[] indexBuffer]
  *   Stream 2 (Body):
  *     [byte colCount] [colDefs: (byte fieldType, byte dataType) * colCount]
  *     [rows: (int32 rowByteSize, col1, col2, ...) * recordCount]
  *   Output = Stream1 + Stream2
  *
- * Reference: C:\PersonalProjects\DNMTableConverter\CVSData.cs
+ * Reference: E:\TableConverter\TableConverter\CSVData.cs
  */
 
 const csvBytesConverter = (function() {
@@ -98,6 +98,12 @@ const csvBytesConverter = (function() {
         this._advance(2);
     };
 
+    BinaryWriter.prototype.writeUInt16 = function(val) {
+        this._ensure(2);
+        this.view.setUint16(this.pos, val & 0xFFFF, true);
+        this._advance(2);
+    };
+
     BinaryWriter.prototype.writeFloat32 = function(val) {
         this._ensure(4);
         this.view.setFloat32(this.pos, +val, true);
@@ -113,7 +119,6 @@ const csvBytesConverter = (function() {
     // C# BinaryWriter.Write(long) — little-endian 8 bytes
     BinaryWriter.prototype.writeInt64 = function(val) {
         this._ensure(8);
-        // Use BigInt when available for exact 64-bit two's complement
         if (typeof BigInt !== 'undefined') {
             var big = BigInt(val);
             var mask32 = BigInt(0xFFFFFFFF);
@@ -122,13 +127,11 @@ const csvBytesConverter = (function() {
             this.view.setUint32(this.pos, lo, true);
             this.view.setUint32(this.pos + 4, hi, true);
         } else {
-            // Fallback: manual split for safe-integer range
             var isNeg = val < 0;
             var abs = isNeg ? -val : val;
             var lo = abs % 0x100000000;
             var hi = Math.floor(abs / 0x100000000);
             if (isNeg) {
-                // Two's complement: invert all bits, add 1
                 lo = ((~lo) + 1) >>> 0;
                 hi = (~hi + (lo === 0 ? 1 : 0)) >>> 0;
             }
@@ -153,7 +156,6 @@ const csvBytesConverter = (function() {
     //   7-bit encoded integer length prefix, then UTF-8 bytes
     BinaryWriter.prototype.writeString = function(str) {
         if (str === null || str === undefined) str = '';
-        // Encode to UTF-8
         var utf8Bytes = [];
         for (var i = 0; i < str.length; i++) {
             var code = str.charCodeAt(i);
@@ -163,7 +165,6 @@ const csvBytesConverter = (function() {
                 utf8Bytes.push(0xC0 | (code >> 6));
                 utf8Bytes.push(0x80 | (code & 0x3F));
             } else if (code >= 0xD800 && code <= 0xDBFF) {
-                // Surrogate pair
                 i++;
                 var low = str.charCodeAt(i);
                 var codePoint = ((code - 0xD800) << 10) + (low - 0xDC00) + 0x10000;
@@ -178,7 +179,6 @@ const csvBytesConverter = (function() {
             }
         }
         var len = utf8Bytes.length;
-        // Write 7-bit encoded length (matches C# BinaryWriter)
         this._write7BitEncodedInt(len);
         this._ensure(len);
         for (var j = 0; j < len; j++) {
@@ -188,7 +188,7 @@ const csvBytesConverter = (function() {
     };
 
     BinaryWriter.prototype._write7BitEncodedInt = function(value) {
-        value = value >>> 0; // unsigned
+        value = value >>> 0;
         while (value >= 0x80) {
             this.writeByte((value & 0x7F) | 0x80);
             value >>>= 7;
@@ -204,7 +204,6 @@ const csvBytesConverter = (function() {
         return this.pos;
     };
 
-    // Returns bytes [0 .. _maxPos) — safe even after seek-back patching
     BinaryWriter.prototype.toUint8Array = function() {
         return new Uint8Array(this.buffer, 0, this._maxPos);
     };
@@ -214,24 +213,18 @@ const csvBytesConverter = (function() {
     };
 
     // ════════════════════════════════════════════════════════════════════
-    //  DataPool — hash-deduped value pool (mirrors DataHandler.DataInfo<T>)
-    //
-    //  C# behaviour: Clear() seeds pool with 4 default(T) entries and
-    //  registers hash=0 → index 0.  WriteDataHead writes count=0 when
-    //  pool.Count == 4 (i.e. nothing was actually added).
+    //  DataPool 
     // ════════════════════════════════════════════════════════════════════
     function DataPool(defaultValue) {
         this.pool = [];
-        this.dataMap = {};   // hash(uint32) → { index, count }
+        this.dataMap = {};
         this._default = (defaultValue !== undefined) ? defaultValue : null;
-        // Seed 4 defaults (matches C# DataInfo<T>.Clear)
         for (var i = 0; i < 4; i++) this.pool.push(this._default);
         this.dataMap[0] = { index: 0, count: 0 };
     }
 
-    // Mirrors DataHandler.Add<T>
     DataPool.prototype.add = function(values, count, hash, writer, writeIndex, indexBuffer) {
-        var key = hash >>> 0;   // ensure unsigned
+        var key = hash >>> 0;
         var info = this.dataMap[key];
         if (!info) {
             info = { index: this.pool.length, count: 0 };
@@ -242,21 +235,19 @@ const csvBytesConverter = (function() {
         }
         info.count++;
         if (writeIndex) {
-            writer.writeInt32(info.index);
+            writer.writeUInt16(info.index); // ushort (2 bytes)
         } else if (indexBuffer) {
-            indexBuffer.push(info.index);
+            indexBuffer.push(info.index); // stored as ushort in indexBuffer list
         }
         return info.index;
     };
 
-    // C#: if pool.Count == 4 → write 0 (nothing added beyond defaults)
     DataPool.prototype.getCount = function() {
         return this.pool.length === 4 ? 0 : this.pool.length;
     };
 
     // ════════════════════════════════════════════════════════════════════
-    //  DataHandler — manages all six typed pools + indexBuffer
-    //  Mirrors CVSData.DataHandler
+    //  DataHandler
     // ════════════════════════════════════════════════════════════════════
     function DataHandler() {
         this.clear();
@@ -273,20 +264,14 @@ const csvBytesConverter = (function() {
         this.indexBuffer = [];
     };
 
-    // C# StringParse.Write with dh != null:
-    //   hash = XHash(data); buffer[0] = data; dh.Add<string>(buffer, 1, hash, stream, true)
     DataHandler.prototype.addString = function(value, writer) {
         var s = (value === null || value === undefined) ? '' : value;
         var hash = xHash(s);
         this.strings.add([s], 1, hash, writer, true, this.indexBuffer);
     };
 
-    // C# DataHandler.WriteHead — writes all pools to header stream
     DataHandler.prototype.writeHead = function(writer) {
-        // 1. bool hasStringSeq
         writer.writeBool(this.hasStringSeq);
-
-        // 2. Six pools in order: string, int, uint, long, float, double
         this._writeStringPool(writer, this.strings);
         this._writeTypedPool(writer, this.ints, 'writeInt32');
         this._writeTypedPool(writer, this.uints, 'writeUInt32');
@@ -294,17 +279,16 @@ const csvBytesConverter = (function() {
         this._writeTypedPool(writer, this.floats, 'writeFloat32');
         this._writeTypedPool(writer, this.doubles, 'writeFloat64');
 
-        // 3. Index buffer
         var ibLen = this.indexBuffer.length;
-        writer.writeInt32(ibLen);
+        writer.writeUInt16(ibLen); // ushort
         for (var i = 0; i < ibLen; i++) {
-            writer.writeInt32(this.indexBuffer[i]);
+            writer.writeUInt16(this.indexBuffer[i]); // ushort (2 bytes)
         }
     };
 
     DataHandler.prototype._writeStringPool = function(writer, pool) {
         var count = pool.getCount();
-        writer.writeInt32(count);
+        writer.writeUInt16(count); // ushort
         for (var i = 0; i < count; i++) {
             var s = pool.pool[i];
             writer.writeString((s === null || s === undefined) ? '' : s);
@@ -313,7 +297,7 @@ const csvBytesConverter = (function() {
 
     DataHandler.prototype._writeTypedPool = function(writer, pool, writeMethod) {
         var count = pool.getCount();
-        writer.writeInt32(count);
+        writer.writeUInt16(count); // ushort
         for (var i = 0; i < count; i++) {
             var v = pool.pool[i];
             writer[writeMethod]((v === null || v === undefined) ? 0 : v);
@@ -321,7 +305,7 @@ const csvBytesConverter = (function() {
     };
 
     // ════════════════════════════════════════════════════════════════════
-    //  Type Inference — scans column values to pick the best data type
+    //  Type Inference
     // ════════════════════════════════════════════════════════════════════
     function inferColumnType(values) {
         if (!values || values.length === 0) return EDataType.STRING;
@@ -342,7 +326,6 @@ const csvBytesConverter = (function() {
         if (nonEmpty === 0) return EDataType.STRING;
         if (hasBool && !hasFloat) return EDataType.BOOL;
         if (hasInt) {
-            // Range check: int32 [-2147483648, 2147483647] or long
             for (var j = 0; j < values.length; j++) {
                 var n = parseInt((values[j] || '').trim(), 10);
                 if (!isNaN(n) && (n > 2147483647 || n < -2147483648)) return EDataType.LONG;
@@ -354,46 +337,37 @@ const csvBytesConverter = (function() {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  Cell-value writers — match the C# ValueParse.Write(stream, data, dh)
-    //  for each data type's EValue case.
+    //  Cell-value writers (EValue primitive case)
     // ════════════════════════════════════════════════════════════════════
     function writeCellValue(writer, dataHandler, cellStr, dataType) {
         var v = (cellStr || '').trim();
 
         switch (dataType) {
             case EDataType.INT:
-                // C# IntParse.Write: stream.Write((int)value)
                 writer.writeInt32(v === '' ? 0 : (parseInt(v, 10) || 0));
                 break;
 
             case EDataType.UINT:
-                // C# UIntParse.Write: stream.Write((uint)value)
                 writer.writeUInt32(v === '' ? 0 : (parseInt(v, 10) >>> 0));
                 break;
 
             case EDataType.LONG:
-                // C# LongParse.Write: stream.Write((long)value)
                 writer.writeInt64(v === '' ? 0 : (parseInt(v, 10) || 0));
                 break;
 
             case EDataType.FLOAT:
-                // C# FloatParse.Write: stream.Write((float)value)
                 writer.writeFloat32(v === '' ? 0 : (parseFloat(v) || 0));
                 break;
 
             case EDataType.DOUBLE:
-                // C# DoubleParse.Write: stream.Write((double)value)
                 writer.writeFloat64(v === '' ? 0 : (parseFloat(v) || 0));
                 break;
 
             case EDataType.STRING:
-                // C# StringParse.Write: dh.Add<string>(buffer, 1, hash, stream, true)
-                // Writes pool index to row stream; string goes into string pool
                 dataHandler.addString(v, writer);
                 break;
 
             case EDataType.BOOL:
-                // C# BoolParse.Write: stream.Write(bool)
                 var boolVal = false;
                 if (v !== '') {
                     var vl = v.toLowerCase();
@@ -403,72 +377,220 @@ const csvBytesConverter = (function() {
                 break;
 
             case EDataType.BYTE:
-                // C# ByteParse.Write: stream.Write((byte)value)
                 writer.writeByte(v === '' ? 0 : (parseInt(v, 10) || 0));
                 break;
 
             case EDataType.SHORT:
-                // C# ShortParse.Write: stream.Write((short)value)
                 writer.writeInt16(v === '' ? 0 : (parseInt(v, 10) || 0));
                 break;
 
             default:
-                // Fallback: treat as string
                 dataHandler.addString(v, writer);
                 break;
         }
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  generateBytes — main entry point
-    //
-    //  C# WriteFile flow (CVSData.cs line ~832):
-    //    headerWriter  (binaryWriter)  = [totalSize][recordCount] ... [pools]
-    //    bodyWriter    (binaryWriter2) = [colCount][colDefs][rows]
-    //    output = headerWriter.bytes + bodyWriter.bytes
+    //  EArray / ESeq / ESeqList Serialization helpers
     // ════════════════════════════════════════════════════════════════════
-    function generateBytes(headerRow, dataRows, columnTypes) {
+    
+    function writeArrayValue(writer, dataHandler, cellStr, dataType) {
+        var v = (cellStr || '').trim();
+        if (v === '') {
+            writer.writeByte(0);
+            return;
+        }
+        var items = v.split('|');
+        var len = items.length;
+        writer.writeByte(len & 0xFF);
+        for (var i = 0; i < len; i++) {
+            writeCellValue(writer, dataHandler, items[i], dataType);
+        }
+    }
+
+    function addSeqToPool(dataHandler, parts, dataType, count, post, writer, writeIndex) {
+        var data = [];
+        var hashText = '';
+        for (var i = 0; i < count; i++) {
+            var part = i < parts.length ? parts[i].trim() : '0';
+            data.push(part);
+            if (i > 0) hashText += '=';
+            hashText += part;
+        }
+        hashText += post;
+        var hash = xHash(hashText);
+
+        var parsedValues = [];
+        var pool = null;
+        switch (dataType) {
+            case EDataType.INT:
+                pool = dataHandler.ints;
+                for (var i = 0; i < count; i++) parsedValues.push(parseInt(data[i], 10) || 0);
+                break;
+            case EDataType.UINT:
+                pool = dataHandler.uints;
+                for (var i = 0; i < count; i++) parsedValues.push((parseInt(data[i], 10) >>> 0) || 0);
+                break;
+            case EDataType.LONG:
+                pool = dataHandler.longs;
+                for (var i = 0; i < count; i++) parsedValues.push(parseInt(data[i], 10) || 0);
+                break;
+            case EDataType.FLOAT:
+                pool = dataHandler.floats;
+                for (var i = 0; i < count; i++) parsedValues.push(parseFloat(data[i]) || 0);
+                break;
+            case EDataType.DOUBLE:
+                pool = dataHandler.doubles;
+                for (var i = 0; i < count; i++) parsedValues.push(parseFloat(data[i]) || 0);
+                break;
+            case EDataType.STRING:
+                pool = dataHandler.strings;
+                for (var i = 0; i < count; i++) parsedValues.push(data[i]);
+                dataHandler.hasStringSeq = true;
+                break;
+            default:
+                throw new Error('Unsupported sequence data type: ' + dataType);
+        }
+
+        return pool.add(parsedValues, count, hash, writer, writeIndex, dataHandler.indexBuffer);
+    }
+
+    function calcSeqHash(parts, count, post) {
+        var data = [];
+        var hashText = '';
+        for (var i = 0; i < count; i++) {
+            var part = i < parts.length ? parts[i].trim() : '0';
+            data.push(part);
+            if (i > 0) hashText += '=';
+            hashText += part;
+        }
+        hashText += post;
+        return xHash(hashText);
+    }
+
+    function checkAllSame(seqStrings, count, post) {
+        if (seqStrings.length <= 1) return true;
+        var hash0 = calcSeqHash(seqStrings[0].split('='), count, post);
+        for (var i = 1; i < seqStrings.length; i++) {
+            var hash = calcSeqHash(seqStrings[i].split('='), count, post);
+            if (hash !== hash0) return false;
+        }
+        return true;
+    }
+
+    // ESeq count is dimension, post is type suffix (e.g. 'I')
+    function writeSeqValue(writer, dataHandler, cellStr, dataType, count, post) {
+        var v = (cellStr || '').trim();
+        if (v === '') {
+            writer.writeUInt16(0); // ushort
+            return;
+        }
+        var parts = v.split('=');
+        addSeqToPool(dataHandler, parts, dataType, count, post, writer, true);
+    }
+
+    function writeSeqListValue(writer, dataHandler, cellStr, dataType, count, post) {
+        var v = (cellStr || '').trim();
+        if (v === '') {
+            writer.writeByte(0);
+            return;
+        }
+        var seqStrings = v.split('|');
+        if (seqStrings.length === 0) {
+            writer.writeByte(0);
+            return;
+        }
+        var len = seqStrings.length;
+        writer.writeByte(len & 0xFF);
+
+        var allSame = checkAllSame(seqStrings, count, post);
+        writer.writeByte(allSame ? 1 : 0);
+
+        if (allSame) {
+            var parts = seqStrings[0].split('=');
+            addSeqToPool(dataHandler, parts, dataType, count, post, writer, true);
+        } else {
+            var ibIndex = dataHandler.indexBuffer.length;
+            writer.writeUInt16(ibIndex); // ushort
+            for (var i = 0; i < len; i++) {
+                var parts = seqStrings[i].split('=');
+                addSeqToPool(dataHandler, parts, dataType, count, post, writer, false);
+            }
+        }
+    }
+
+    // Get default post suffix for a data type
+    function getPostSuffix(dataType) {
+        switch (dataType) {
+            case EDataType.FLOAT:  return 'F';
+            case EDataType.DOUBLE: return 'D';
+            case EDataType.UINT:   return 'U';
+            case EDataType.INT:    return 'I';
+            case EDataType.LONG:   return 'L';
+            case EDataType.STRING: return 'S';
+            case EDataType.BOOL:   return 'B';
+            case EDataType.BYTE:   return 'T';
+            case EDataType.SHORT:  return 'H';
+            default: return 'S';
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  generateBytes — main entry point
+    // ════════════════════════════════════════════════════════════════════
+    function generateBytes(headerRow, dataRows, columnDefs) {
         var colCount = headerRow.length;
         var recordCount = dataRows.length;
         var dataHandler = new DataHandler();
 
         // ── Stream 1: Header ────────────────────────────────────────────
         var headerWriter = new BinaryWriter(4096);
-
-        // Placeholders (patched after pools are written)
-        headerWriter.writeInt32(0);    // [0..3]  totalSize
-        headerWriter.writeInt32(0);    // [4..7]  recordCount
+        headerWriter.writeInt32(0);    // Patched: totalSize
+        headerWriter.writeInt32(0);    // Patched: recordCount
 
         // ── Stream 2: Body ──────────────────────────────────────────────
         var bodyWriter = new BinaryWriter(Math.max(4096, recordCount * colCount * 8));
 
-        // C# OnHeaderLine → binaryWriter2.Write((byte)colCount)
         bodyWriter.writeByte(colCount & 0xFF);
 
-        // Column definitions: (byte fieldType, byte dataType) per column
-        // C#: binaryWriter2.Write((byte)tfi.tableFieldType); binaryWriter2.Write(tfi.dataType);
+        // Write column definitions: (byte fieldType, byte dataType) per column
         for (var c = 0; c < colCount; c++) {
-            bodyWriter.writeByte(EFieldType.EValue);   // fieldType
-            bodyWriter.writeByte(columnTypes[c]);       // dataType
+            var def = columnDefs[c];
+            bodyWriter.writeByte(def.fieldType);
+            bodyWriter.writeByte(def.dataType);
         }
 
         // Write rows
-        // C# WriteLine (version > 1): write int placeholder, write columns, patch size
         for (var r = 0; r < recordCount; r++) {
             var row = dataRows[r];
-
-            // Row size placeholder
             var rowSizePos = bodyWriter.getPosition();
-            bodyWriter.writeInt32(0);
+            bodyWriter.writeInt32(0); // size placeholder
 
             var rowDataStart = bodyWriter.getPosition();
 
             for (var col = 0; col < colCount; col++) {
                 var cell = (col < row.length) ? row[col] : '';
-                writeCellValue(bodyWriter, dataHandler, cell, columnTypes[col]);
+                var def = columnDefs[col];
+
+                switch (def.fieldType) {
+                    case EFieldType.EValue:
+                        writeCellValue(bodyWriter, dataHandler, cell, def.dataType);
+                        break;
+                    case EFieldType.EArray:
+                        writeArrayValue(bodyWriter, dataHandler, cell, def.dataType);
+                        break;
+                    case EFieldType.ESeq:
+                        writeSeqValue(bodyWriter, dataHandler, cell, def.dataType, def.count, def.post);
+                        break;
+                    case EFieldType.ESeqList:
+                        writeSeqListValue(bodyWriter, dataHandler, cell, def.dataType, def.count, def.post);
+                        break;
+                    default:
+                        writeCellValue(bodyWriter, dataHandler, cell, def.dataType);
+                        break;
+                }
             }
 
-            // Patch row byte size (bytes after the size field)
             var rowDataEnd = bodyWriter.getPosition();
             var rowByteSize = rowDataEnd - rowDataStart;
             bodyWriter.seek(rowSizePos);
@@ -476,22 +598,17 @@ const csvBytesConverter = (function() {
             bodyWriter.seek(rowDataEnd);
         }
 
-        // ── Write pools into header stream ──────────────────────────────
-        // C#: this.dataHandler.WriteHead(binaryWriter);
         dataHandler.writeHead(headerWriter);
 
-        // ── Patch totalSize and recordCount ──────────────────────────────
-        // C#: num = binaryWriter.BaseStream.Position + binaryWriter2.BaseStream.Position
         var headerLen = headerWriter.getLength();
         var bodyLen = bodyWriter.getLength();
         var totalSize = headerLen + bodyLen;
 
         headerWriter.seek(0);
-        headerWriter.writeInt32(totalSize);    // patch totalSize
-        headerWriter.writeInt32(recordCount);  // patch recordCount
+        headerWriter.writeInt32(totalSize);
+        headerWriter.writeInt32(recordCount);
 
-        // ── Concatenate headerStream + bodyStream ───────────────────────
-        var headerBytes = headerWriter.toUint8Array(); // uses _maxPos, safe after seek
+        var headerBytes = headerWriter.toUint8Array();
         var bodyBytes = bodyWriter.toUint8Array();
         var result = new Uint8Array(headerLen + bodyLen);
         result.set(headerBytes, 0);
@@ -501,7 +618,7 @@ const csvBytesConverter = (function() {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  convertTableToBytes — convenience wrapper
+    //  convertTableToBytes
     // ════════════════════════════════════════════════════════════════════
     function convertTableToBytes(tableData, options) {
         options = options || {};
@@ -518,27 +635,43 @@ const csvBytesConverter = (function() {
             throw new Error('No data rows to convert');
         }
 
-        // Determine column types
-        var columnTypes = options.columnTypes;
-        if (!columnTypes) {
-            columnTypes = [];
+        // Parse or infer column definitions
+        var columnDefs = options.columnDefs;
+        if (!columnDefs) {
+            columnDefs = [];
+            var types = options.columnTypes;
             for (var c = 0; c < headerRow.length; c++) {
-                var colValues = [];
-                for (var r = 0; r < dataRows.length; r++) {
-                    if (c < dataRows[r].length) colValues.push(dataRows[r][c]);
+                var dataType = EDataType.STRING;
+                if (types && types[c] !== undefined) {
+                    dataType = types[c];
+                } else {
+                    var colValues = [];
+                    for (var r = 0; r < dataRows.length; r++) {
+                        if (c < dataRows[r].length) colValues.push(dataRows[r][c]);
+                    }
+                    dataType = inferColumnType(colValues);
                 }
-                columnTypes.push(inferColumnType(colValues));
+                columnDefs.push({
+                    fieldType: EFieldType.EValue,
+                    dataType: dataType,
+                    count: 2,
+                    post: getPostSuffix(dataType)
+                });
+            }
+        } else {
+            for (var c = 0; c < columnDefs.length; c++) {
+                var def = columnDefs[c];
+                if (def.fieldType === undefined) def.fieldType = EFieldType.EValue;
+                if (def.dataType === undefined) def.dataType = EDataType.STRING;
+                if (def.count === undefined) def.count = 2;
+                if (def.post === undefined) def.post = getPostSuffix(def.dataType);
             }
         }
 
-        return generateBytes(headerRow, dataRows, columnTypes);
+        return generateBytes(headerRow, dataRows, columnDefs);
     }
 
-    // ════════════════════════════════════════════════════════════════════
-    //  Base64 encoding
-    // ════════════════════════════════════════════════════════════════════
     function uint8ArrayToBase64(uint8Array) {
-        // Process in chunks to avoid call-stack limits on large files
         var chunks = [];
         var chunkSize = 8192;
         for (var i = 0; i < uint8Array.length; i += chunkSize) {
@@ -552,9 +685,6 @@ const csvBytesConverter = (function() {
         return btoa(chunks.join(''));
     }
 
-    // ════════════════════════════════════════════════════════════════════
-    //  Public API
-    // ════════════════════════════════════════════════════════════════════
     return {
         VERSION: VERSION,
         EFieldType: EFieldType,
@@ -567,6 +697,7 @@ const csvBytesConverter = (function() {
         generateBytes: generateBytes,
         convertTableToBytes: convertTableToBytes,
         uint8ArrayToBase64: uint8ArrayToBase64,
+        getPostSuffix: getPostSuffix,
 
         getTypeName: function(dataType) {
             var names = {};
