@@ -43,20 +43,40 @@ It can easily manage the server through the Web terminal, improving the operatio
 
 ## Installation
 
-> Make sure it is a clean operating system, and have not installed Apache /Nginx/php/MySQL from other environments
-> aaPanel is developed based on Ubuntu 22+, it is strongly recommended to use Ubuntu 22+ linux distribution
+> [!IMPORTANT]
+> Make sure it is a clean operating system. Do not install Apache, Nginx, PHP, or MySQL beforehand from other environments. aaPanel is optimized for a clean system.
+> aaPanel is developed based on Ubuntu 22+, and we strongly recommend using Ubuntu 22+ or Debian 11+ Linux distributions.
 
- Note, please execute the installation command with root authority
+### System Requirements
+* **Memory**: 512MB or more (768MB or more is recommended). Pure panel uses about 60MB of RAM.
+* **Hard Disk**: 100MB or more available space. Pure panel uses about 20MB of disk space.
+* **Supported OS**: Ubuntu 20.04/22.04/24.04, Debian 11/12, CentOS 9, Rocky Linux 8/9, AlmaLinux 8/9.
 
-* Memory: 512M or more, 768M or more is recommended (Pure panel for about 60M of system memory)
+### Installation Options on Linux
 
-* Hard disk: More than 100M available hard disk space (Pure panel for about 20M disk space)
+All installation commands must be executed with **root authority** (or prefix with `sudo`).
 
-* System: Ubuntu 22.04 24.04, Debian 11 12, CentOS 9, Rocky/AlmaLinux 8 9, to ensure that it is a clean operating system, there is no other environment with Apache/Nginx/php/MySQL installed (the existing environment can not be installed)
+#### Option 1: Universal Installation Command (Recommended)
+This script will automatically detect your Linux distribution and start the installation:
+```bash
+URL=https://www.aapanel.com/script/install_6.0_en.sh && if [ -f /usr/bin/curl ];then curl -ksSO "$URL" ;else wget --no-check-certificate -O install_6.0_en.sh "$URL";fi;sudo bash install_6.0_en.sh aapanel
+```
 
-**aaPanel Installation Command**
+#### Option 2: Ubuntu/Debian Specific Installation
+```bash
+wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh && sudo bash install.sh aapanel
+```
 
-`URL=https://www.aapanel.com/script/install_6.0_en.sh && if [ -f /usr/bin/curl ];then curl -ksSO "$URL" ;else wget --no-check-certificate -O install_6.0_en.sh "$URL";fi;bash install_6.0_en.sh 66959f96`
+#### Option 3: RedHat / Rocky Linux / AlmaLinux / CentOS
+```bash
+yum install -y wget && wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh && sudo bash install.sh aapanel
+```
+
+#### Option 4: Local Installation (From Cloned Repository)
+If you have cloned this repository, you can execute the setup script directly from the root folder:
+```bash
+sudo bash install.sh
+```
 
 **aaPanel Docker Deployment**
 

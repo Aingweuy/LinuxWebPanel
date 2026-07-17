@@ -6,6 +6,8 @@
 
 const csvFileManagerIntegration = {
     delimiter: ',',
+    encoding: 'utf-8',
+    quote_char: '"',
     delimiter_options: {
         'comma': ',',
         'tab': '\t',
@@ -34,17 +36,41 @@ const csvFileManagerIntegration = {
         
         if (typeof original_render_menu === 'function') {
             bt_file.render_file_groud_menu = function(ev, el) {
+                // Call original function first to populate the DOM menu
+                original_render_menu.call(this, ev, el);
+                
                 const index = $(el).data('index');
                 const data = bt_file.file_list[index];
                 
                 // Add CSV edit option for supported file types
                 if (that.is_csv_file(data.ext) || that.is_csv_file(data.filename)) {
-                    if (!data.config) data.config = {};
-                    data.config.edit_csv = 'Edit in CSV Editor';
+                    const menu_ul = $('.selection_right_menu ul');
+                    
+                    // Prevent duplicate injections
+                    menu_ul.find('li[data-id="edit_csv"]').remove();
+                    
+                    // Insert right after the Edit/Open item (which is usually the first item)
+                    const open_item = menu_ul.find('li').first();
+                    const csv_item = $(`
+                        <li data-id="edit_csv">
+                            <i class="file_menu_icon edit_file_icon"></i>
+                            <span>Edit in CSV Editor</span>
+                        </li>
+                    `);
+                    
+                    csv_item.on('click', function(e) {
+                        $('.selection_right_menu').removeAttr('style');
+                        that.open_csv_editor(data);
+                        e.stopPropagation();
+                        e.preventDefault();
+                    });
+                    
+                    if (open_item.length > 0) {
+                        open_item.after(csv_item);
+                    } else {
+                        menu_ul.prepend(csv_item);
+                    }
                 }
-                
-                // Call original function
-                original_render_menu.call(this, ev, el);
             };
         }
         
@@ -67,17 +93,6 @@ const csvFileManagerIntegration = {
      */
     bind_file_events: function() {
         const that = this;
-        
-        // Double-click CSV files
-        $(document).on('dblclick', '.file_list_content .file_tr', function(e) {
-            const index = $(this).data('index');
-            const data = bt_file.file_list[index];
-            
-            if (that.is_csv_file(data.ext) || that.is_csv_file(data.filename)) {
-                e.stopPropagation();
-                that.open_csv_editor(data);
-            }
-        });
         
         // Context menu for CSV files
         $(document).on('contextmenu', '.file_list_content .file_tr', function(e) {
@@ -284,6 +299,21 @@ const csvFileManagerIntegration = {
                 
                 // Update statistics
                 that.update_table_stats();
+            },
+            cancel: function(index, layero) {
+                if (csvEditor.is_editing) {
+                    const confirm_index = layer.confirm('You have unsaved changes. Are you sure you want to close?', {
+                        icon: 3,
+                        btn: ['Yes', 'No'],
+                        closeBtn: 2
+                    }, function() {
+                        layer.close(confirm_index);
+                        layer.close(index);
+                        csvEditor.is_editing = false;
+                    });
+                    return false; // Prevent immediate close
+                }
+                csvEditor.is_editing = false;
             }
         });
     },
@@ -312,14 +342,15 @@ const csvFileManagerIntegration = {
         const cells = [];
         let current_cell = '';
         let in_quotes = false;
+        const quote = this.quote_char || '"';
         
         for (let i = 0; i < line.length; i++) {
             const char = line[i];
             const next_char = line[i + 1];
             
-            if (char === '"') {
-                if (in_quotes && next_char === '"') {
-                    current_cell += '"';
+            if (char === quote) {
+                if (in_quotes && next_char === quote) {
+                    current_cell += quote;
                     i++;
                 } else {
                     in_quotes = !in_quotes;
@@ -419,16 +450,18 @@ const csvFileManagerIntegration = {
      */
     export_table_to_csv: function(table_element, delimiter = null) {
         if (!delimiter) delimiter = this.delimiter;
+        const quote = this.quote_char || '"';
+        const escaped_quote = quote + quote;
         
         const rows = [];
         
         table_element.find('tr').each(function() {
             const cells = [];
             $(this).find('th input, td input').each(function() {
-                const value = $(this).val();
+                const value = $(this).val() || '';
                 // Quote if contains delimiter or quotes
-                if (value.includes(delimiter) || value.includes('"')) {
-                    cells.push('"' + value.replace(/"/g, '""') + '"');
+                if (value.includes(delimiter) || value.includes(quote) || value.includes('\n')) {
+                    cells.push(quote + value.replace(new RegExp(quote, 'g'), escaped_quote) + quote);
                 } else {
                     cells.push(value);
                 }
@@ -488,6 +521,8 @@ const csvFileManagerIntegration = {
             btn: ['Save', 'Cancel'],
             yes: function(index) {
                 that.delimiter = that.delimiter_options[$('.settings_delimiter').val()];
+                that.encoding = $('.settings_encoding').val();
+                that.quote_char = $('.settings_quote').val() || '"';
                 layer.close(index);
                 layer.msg('Settings saved', { icon: 1 });
             }
@@ -675,6 +710,102 @@ const csvFileManagerIntegration = {
                 layer.close(index);
             }
         });
+    },
+
+    /**
+     * Convert file format (CSV, TSV, TXT, JSON)
+     */
+    convert_file_format: function(data, target_format) {
+        const that = this;
+        const source_delim_name = $('.convert_source_delim').val();
+        const source_delim = this.delimiter_options[source_delim_name] || ',';
+        
+        const loadT = bt.load('Converting file...');
+        
+        bt.send('GetFileBody', 'files/GetFileBody', {
+            filename: data.path
+        }, function(res) {
+            loadT.close();
+            
+            if (!res.status) {
+                layer.msg('Failed to load file: ' + res.msg, { icon: 2 });
+                return;
+            }
+            
+            try {
+                const csv_table = that.parse_csv(res.data, source_delim);
+                if (csv_table.length === 0) {
+                    layer.msg('File is empty, nothing to convert', { icon: 0 });
+                    return;
+                }
+                
+                let target_content = '';
+                let target_ext = target_format;
+                
+                if (target_format === 'csv') {
+                    target_content = that.table_to_delimited_string(csv_table, ',');
+                } else if (target_format === 'tsv') {
+                    target_content = that.table_to_delimited_string(csv_table, '\t');
+                    target_ext = 'tsv';
+                } else if (target_format === 'txt') {
+                    target_content = that.table_to_delimited_string(csv_table, ',');
+                    target_ext = 'txt';
+                } else if (target_format === 'json') {
+                    const headers = csv_table[0];
+                    const json_data = [];
+                    for (let i = 1; i < csv_table.length; i++) {
+                        const row_obj = {};
+                        csv_table[i].forEach((cell, idx) => {
+                            const header_name = headers[idx] || `column_${idx + 1}`;
+                            row_obj[header_name] = cell;
+                        });
+                        json_data.push(row_obj);
+                    }
+                    target_content = JSON.stringify(json_data, null, 4);
+                }
+                
+                const path_parts = data.path.split('.');
+                if (path_parts.length > 1) {
+                    path_parts.pop();
+                }
+                const new_path = path_parts.join('.') + '.' + target_ext;
+                
+                const saveT = bt.load('Saving converted file...');
+                bt.send('WriteFileBody', 'files/WriteFileBody', {
+                    filename: new_path,
+                    content: target_content
+                }, function(save_res) {
+                    saveT.close();
+                    if (save_res.status) {
+                        layer.msg('Successfully converted and saved to: ' + new_path, { icon: 1 });
+                        if (typeof bt_file !== 'undefined' && typeof bt_file.get_list === 'function') {
+                            bt_file.get_list();
+                        }
+                    } else {
+                        layer.msg('Failed to save converted file: ' + save_res.msg, { icon: 2 });
+                    }
+                });
+            } catch (err) {
+                layer.msg('Error during conversion: ' + err.message, { icon: 2 });
+            }
+        });
+    },
+
+    /**
+     * Helper to convert 2D array back to delimited string
+     */
+    table_to_delimited_string: function(table, delimiter) {
+        const quote = this.quote_char || '"';
+        const escaped_quote = quote + quote;
+        return table.map(row => {
+            return row.map(cell => {
+                const cell_str = String(cell);
+                if (cell_str.includes(delimiter) || cell_str.includes(quote) || cell_str.includes('\n')) {
+                    return quote + cell_str.replace(new RegExp(quote, 'g'), escaped_quote) + quote;
+                }
+                return cell_str;
+            }).join(delimiter);
+        }).join('\n');
     }
 };
 

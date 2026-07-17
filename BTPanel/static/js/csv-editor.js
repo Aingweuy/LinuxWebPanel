@@ -14,8 +14,39 @@ const csvEditor = {
      * Initialize CSV editor and integrate with file manager menu
      */
     init: function() {
+        this.intercept_global_editor();
         this.extend_file_manager_menu();
         this.bind_events();
+    },
+    
+    /**
+     * Intercept global openEditorView to handle .csv and .tsv files
+     */
+    intercept_global_editor: function() {
+        const that = this;
+        if (window.original_openEditorView) return; // Prevent duplicate intercepts
+        
+        const original_open = window.openEditorView;
+        if (typeof original_open === 'function') {
+            window.original_openEditorView = original_open;
+            window.openEditorView = function(type, path) {
+                if (path) {
+                    const ext = path.toLowerCase().split('.').pop();
+                    if (ext === 'csv' || ext === 'tsv') {
+                        const data = {
+                            path: path,
+                            filename: path.split('/').pop(),
+                            ext: ext
+                        };
+                        if (typeof csvFileManagerIntegration !== 'undefined') {
+                            csvFileManagerIntegration.open_csv_editor(data);
+                            return;
+                        }
+                    }
+                }
+                original_open.call(this, type, path);
+            };
+        }
     },
     
     /**
@@ -24,10 +55,27 @@ const csvEditor = {
     extend_file_manager_menu: function() {
         const that = this;
         
-        // Hook into existing file manager context menu
-        $(document).on('contextmenu', '.csv_table_container, [data-file-type="csv"]', function(e) {
+        // Remove previous listener to prevent duplicate bindings
+        $(document).off('contextmenu', '.csv_table td.csv_cell, .csv_table th');
+        
+        // Context menu inside CSV editor table
+        $(document).on('contextmenu', '.csv_table td.csv_cell, .csv_table th', function(e) {
             e.preventDefault();
-            const file_path = $(this).attr('data-menu-path') || $(this).attr('title');
+            e.stopPropagation();
+            
+            const cell = $(this);
+            that.current_col_index = cell.index();
+            
+            // Highlight the cell
+            $('.csv_cell').removeClass('selected');
+            if (cell.hasClass('csv_cell')) {
+                cell.addClass('selected');
+                that.current_selection = cell;
+            } else {
+                that.current_selection = null;
+            }
+            
+            const file_path = that.current_file;
             that.show_csv_menu(e.clientX, e.clientY, file_path, this);
         });
     },
@@ -37,6 +85,10 @@ const csvEditor = {
      */
     bind_events: function() {
         const that = this;
+        
+        // Remove previous listeners first
+        $(document).off('click', '.csv_cell');
+        $(document).off('input', '.csv_input, .csv_header_cell');
         
         // Cell selection
         $(document).on('click', '.csv_cell', function(e) {
@@ -49,6 +101,11 @@ const csvEditor = {
                 $(this).addClass('selected');
             }
             that.current_selection = $('.csv_cell.selected');
+        });
+        
+        // Mark as modified on user input
+        $(document).on('input', '.csv_input, .csv_header_cell', function() {
+            that.mark_modified();
         });
         
         // Close menu on outside click
@@ -227,25 +284,46 @@ const csvEditor = {
      */
     insert_row: function(target) {
         const row = $(target).closest('tr');
+        if (row.parent().is('thead') || row.closest('thead').length > 0) {
+            layer.msg('Cannot insert row above headers', { icon: 0 });
+            return;
+        }
+        
         const new_row = $('<tr class="csv_row"></tr>');
-        row.find('td').each(function() {
+        const col_count = $('table.csv_table thead th').length;
+        for (let i = 0; i < col_count; i++) {
             new_row.append('<td class="csv_cell"><input type="text" class="csv_input"></td>');
-        });
+        }
+        
         row.before(new_row);
         layer.msg('Row inserted', { icon: 1 });
         this.mark_modified();
+        
+        if (typeof csvFileManagerIntegration !== 'undefined') {
+            csvFileManagerIntegration.update_table_stats();
+        }
     },
     
     delete_row: function(target) {
         const that = this;
+        const row = $(target).closest('tr');
+        if (row.parent().is('thead') || row.closest('thead').length > 0) {
+            layer.msg('Cannot delete header row', { icon: 0 });
+            return;
+        }
+        
         layer.confirm('Are you sure you want to delete this row?', {
             icon: 3,
             closeBtn: 2
         }, function(index) {
-            $(target).closest('tr').remove();
+            row.remove();
             layer.close(index);
             layer.msg('Row deleted', { icon: 1 });
             that.mark_modified();
+            
+            if (typeof csvFileManagerIntegration !== 'undefined') {
+                csvFileManagerIntegration.update_table_stats();
+            }
         });
     },
     
@@ -253,34 +331,55 @@ const csvEditor = {
      * Column operations
      */
     insert_column: function(target) {
-        const cell = $(target).closest('td');
+        const cell = $(target).closest('td, th');
         const col_index = cell.index();
         
+        $('table.csv_table thead tr').each(function() {
+            const th = $(this).find('th').eq(col_index);
+            const new_th = $(`
+                <th style="border: 1px solid #ddd; padding: 10px; font-weight: bold; background-color: #f0f0f0;">
+                    <input type="text" value="New Column" class="csv_header_cell" style="width: 100%; border: none; background: transparent; padding: 4px; font-weight: bold;">
+                </th>
+            `);
+            th.before(new_th);
+        });
+        
         $('table.csv_table tbody tr').each(function() {
-            $(this).find('td').eq(col_index).before(
-                '<td class="csv_cell"><input type="text" class="csv_input"></td>'
-            );
+            const td = $(this).find('td').eq(col_index);
+            const new_td = $('<td class="csv_cell"><input type="text" class="csv_input"></td>');
+            td.before(new_td);
         });
         
         layer.msg('Column inserted', { icon: 1 });
         this.mark_modified();
+        
+        if (typeof csvFileManagerIntegration !== 'undefined') {
+            csvFileManagerIntegration.update_table_stats();
+        }
     },
     
     delete_column: function(target) {
         const that = this;
-        const cell = $(target).closest('td');
+        const cell = $(target).closest('td, th');
         const col_index = cell.index();
         
         layer.confirm('Are you sure you want to delete this column?', {
             icon: 3,
             closeBtn: 2
         }, function(index) {
+            $('table.csv_table thead tr').each(function() {
+                $(this).find('th').eq(col_index).remove();
+            });
             $('table.csv_table tbody tr').each(function() {
                 $(this).find('td').eq(col_index).remove();
             });
             layer.close(index);
             layer.msg('Column deleted', { icon: 1 });
             that.mark_modified();
+            
+            if (typeof csvFileManagerIntegration !== 'undefined') {
+                csvFileManagerIntegration.update_table_stats();
+            }
         });
     },
     
@@ -289,8 +388,10 @@ const csvEditor = {
      */
     cut_cells: function() {
         this.copy_cells();
-        this.current_selection.html('');
+        const cells = this.current_selection || $('.csv_cell.selected');
+        cells.find('input').val('');
         layer.msg('Cut to clipboard', { icon: 1 });
+        this.mark_modified();
     },
     
     copy_cells: function() {
@@ -301,7 +402,7 @@ const csvEditor = {
         }
         
         this.clipboard = cells.map(function() {
-            return $(this).text();
+            return $(this).find('input').val() || '';
         }).get();
         
         layer.msg('Copied to clipboard: ' + this.clipboard.length + ' cells', { icon: 1 });
@@ -319,9 +420,9 @@ const csvEditor = {
             return;
         }
         
-        cells.each((index) => {
+        cells.each((index, cell) => {
             if (index < this.clipboard.length) {
-                $(cells[index]).text(this.clipboard[index]);
+                $(cell).find('input').val(this.clipboard[index]);
             }
         });
         
@@ -398,12 +499,15 @@ const csvEditor = {
         
         cells.each(function() {
             const $cell = $(this);
-            $cell.css({
+            const $input = $cell.find('input');
+            const styles = {
                 'color': color,
                 'background-color': bgcolor,
                 'font-weight': bold ? 'bold' : 'normal',
                 'font-style': italic ? 'italic' : 'normal'
-            });
+            };
+            $cell.css(styles);
+            $input.css(styles);
             $cell.attr('data-format', type);
         });
         
@@ -417,6 +521,7 @@ const csvEditor = {
     align_cells: function(alignment) {
         const cells = this.current_selection || $('.csv_cell.selected');
         cells.css('text-align', alignment);
+        cells.find('input').css('text-align', alignment);
         layer.msg('Alignment: ' + alignment, { icon: 1 });
         this.mark_modified();
     },
@@ -425,18 +530,27 @@ const csvEditor = {
      * Sort column
      */
     sort_column: function(direction) {
+        const col_index = this.current_col_index !== undefined ? this.current_col_index : 0;
         const $table = $('table.csv_table');
         const rows = $table.find('tbody tr').toArray();
         
         rows.sort((a, b) => {
-            const val_a = $(a).find('td').eq(0).text();
-            const val_b = $(b).find('td').eq(0).text();
+            const val_a = $(a).find('td').eq(col_index).find('input').val() || '';
+            const val_b = $(b).find('td').eq(col_index).find('input').val() || '';
+            
+            // Try numeric comparison if both are numbers
+            const num_a = Number(val_a);
+            const num_b = Number(val_b);
+            if (!isNaN(num_a) && !isNaN(num_b)) {
+                return direction === 'asc' ? num_a - num_b : num_b - num_a;
+            }
+            
             return direction === 'asc' 
                 ? val_a.localeCompare(val_b)
                 : val_b.localeCompare(val_a);
         });
         
-        $table.find('tbody').html('');
+        $table.find('tbody').empty();
         rows.forEach(row => $table.find('tbody').append(row));
         
         layer.msg('Sorted ' + direction, { icon: 1 });
@@ -487,22 +601,30 @@ const csvEditor = {
      * Apply filter
      */
     apply_filter: function(value, type) {
+        const col_index = this.current_col_index !== undefined ? this.current_col_index : 0;
+        
+        if (!value) {
+            $('table.csv_table tbody tr').show();
+            layer.msg('Filter cleared', { icon: 1 });
+            return;
+        }
+        
         $('table.csv_table tbody tr').each((index, row) => {
-            const cell_text = $(row).find('td').eq(0).text();
+            const cell_text = $(row).find('td').eq(col_index).find('input').val() || '';
             let match = false;
             
             switch(type) {
                 case 'contains':
-                    match = cell_text.includes(value);
+                    match = cell_text.toLowerCase().includes(value.toLowerCase());
                     break;
                 case 'equals':
-                    match = cell_text === value;
+                    match = cell_text.toLowerCase() === value.toLowerCase();
                     break;
                 case 'starts':
-                    match = cell_text.startsWith(value);
+                    match = cell_text.toLowerCase().startsWith(value.toLowerCase());
                     break;
                 case 'ends':
-                    match = cell_text.endsWith(value);
+                    match = cell_text.toLowerCase().endsWith(value.toLowerCase());
                     break;
             }
             
@@ -522,24 +644,27 @@ const csvEditor = {
         if (format === 'csv') {
             $table.find('tr').each(function() {
                 const row = [];
-                $(this).find('td, th').each(function() {
-                    row.push('"' + $(this).text().replace(/"/g, '""') + '"');
+                $(this).find('th input, td input').each(function() {
+                    row.push('"' + $(this).val().replace(/"/g, '""') + '"');
                 });
-                data += row.join(',') + '\n';
+                if (row.length > 0) {
+                    data += row.join(',') + '\n';
+                }
             });
             
             this.download_file(data, 'data.csv', 'text/csv');
         } else if (format === 'json') {
             const headers = [];
-            $table.find('thead th').each(function() {
-                headers.push($(this).text());
+            $table.find('thead th input').each(function() {
+                headers.push($(this).val());
             });
             
             const rows = [];
             $table.find('tbody tr').each(function() {
                 const row = {};
-                $(this).find('td').each((index, td) => {
-                    row[headers[index]] = $(td).text();
+                $(this).find('td input').each((index, input) => {
+                    const header_name = headers[index] || `column_${index + 1}`;
+                    row[header_name] = $(input).val();
                 });
                 rows.push(row);
             });
@@ -555,7 +680,34 @@ const csvEditor = {
      * Utility functions
      */
     select_range: function(element) {
-        // Implement range selection logic
+        const $start_cell = $('.csv_cell.selected').first();
+        if ($start_cell.length === 0) {
+            $(element).addClass('selected');
+            return;
+        }
+        
+        const start_row = $start_cell.parent().index();
+        const start_col = $start_cell.index();
+        const end_row = $(element).parent().index();
+        const end_col = $(element).index();
+        
+        const min_row = Math.min(start_row, end_row);
+        const max_row = Math.max(start_row, end_row);
+        const min_col = Math.min(start_col, end_col);
+        const max_col = Math.max(start_col, end_col);
+        
+        $('.csv_cell').removeClass('selected');
+        
+        $('table.csv_table tbody tr').each(function(r_idx) {
+            if (r_idx >= min_row && r_idx <= max_row) {
+                $(this).find('td').each(function(c_idx) {
+                    if (c_idx >= min_col && c_idx <= max_col) {
+                        $(this).addClass('selected');
+                    }
+                });
+            }
+        });
+        this.current_selection = $('.csv_cell.selected');
     },
     
     mark_modified: function() {
