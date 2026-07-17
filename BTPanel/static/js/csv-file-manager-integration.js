@@ -833,6 +833,7 @@ const csvFileManagerIntegration = {
     _show_bytes_type_dialog: function(data, csv_table, headerRow, detectedTypes) {
         const that = this;
         const typeNames = ['int', 'float', 'double', 'uint', 'long', 'string', 'bool', 'byte', 'short'];
+        let xmlFields = null;
 
         let rows_html = '';
         for (let i = 0; i < headerRow.length; i++) {
@@ -850,47 +851,248 @@ const csvFileManagerIntegration = {
                 '</tr>';
         }
 
+        const areaHeight = '530px';
         layer.open({
             type: 1,
             title: 'Configure Column Types for .bytes Export',
-            area: ['520px', '480px'],
+            area: ['560px', areaHeight],
             closeBtn: 2,
-            content: '<div class="bt-form pd20 pb70">' +
-                '<div style="margin-bottom:10px;color:#666;font-size:13px;">Auto-detected types are pre-selected. Adjust if needed before export.</div>' +
-                '<div style="max-height:320px;overflow-y:auto;border:1px solid #eee;border-radius:4px;">' +
+            content: '<div class="bt-form pd20" style="padding-bottom:15px; height: calc(100% - 50px); box-sizing: border-box; display: flex; flex-direction: column;">' +
+                // XML Selection Block
+                '<div style="margin-bottom:12px; padding:10px; background:#f9f9f9; border:1px dashed #ccc; border-radius:4px; display:flex; flex-direction:column; gap:6px;">' +
+                    '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                        '<label class="btn btn-default btn-xs" style="position:relative; overflow:hidden; cursor:pointer; margin:0;">' +
+                            'Select Schema XML (cvs.xml)...' +
+                            '<input type="file" id="schema_xml_input" accept=".xml" style="position:absolute; top:0; left:0; width:100%; height:100%; opacity:0; cursor:pointer;" />' +
+                        '</label>' +
+                        '<label style="margin:0; font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:4px; font-size:12px;">' +
+                            '<input type="checkbox" id="bytes_skip_second_row" checked /> Skip 2nd row (type/comment hints)' +
+                        '</label>' +
+                    '</div>' +
+                    '<div id="schema_xml_status" style="color:#777; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">No XML schema loaded. Using auto-detected column types.</div>' +
+                '</div>' +
+                '<div style="margin-bottom:8px;color:#666;font-size:12px;">Columns mapping preview:</div>' +
+                '<div style="flex:1; min-height:150px; overflow-y:auto; border:1px solid #eee; border-radius:4px; margin-bottom:15px;">' +
                 '<table style="width:100%;border-collapse:collapse;">' +
-                '<thead><tr>' +
-                    '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;">Column</th>' +
-                    '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;">Data Type</th>' +
+                '<thead id="bytes_columns_thead"><tr>' +
+                    '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;font-size:12px;">Column</th>' +
+                    '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;font-size:12px;">Data Type</th>' +
                 '</tr></thead>' +
-                '<tbody>' + rows_html + '</tbody>' +
+                '<tbody id="bytes_columns_tbody">' + rows_html + '</tbody>' +
                 '</table></div></div>',
             btn: ['Export .bytes', 'Cancel'],
-            yes: function(index) {
-                // Collect user-selected types
-                const columnTypes = [];
-                for (let c = 0; c < headerRow.length; c++) {
-                    const selectedName = $('.bytes_col_type[data-col="' + c + '"]').val();
-                    columnTypes.push(csvBytesConverter.parseTypeName(selectedName));
-                }
+            success: function(layero, index) {
+                // Bind file input handler
+                layero.find('#schema_xml_input').on('change', function(e) {
+                    const file = e.target.files[0];
+                    if (!file) return;
 
-                layer.close(index);
-                that._execute_bytes_export(data, csv_table, columnTypes);
+                    const reader = new FileReader();
+                    reader.onload = function(evt) {
+                        try {
+                            const xmlText = evt.target.result;
+                            const fileName = data.path.split('/').pop().split('\\').pop();
+                            const tableName = fileName.substring(0, fileName.lastIndexOf('.'));
+
+                            xmlFields = that._parse_schema_xml(xmlText, tableName);
+
+                            layero.find('#schema_xml_status').html(
+                                '<span style="color:green;font-weight:bold;">Loaded: ' + xmlFields.length + ' fields (' + tableName + ')</span>'
+                            );
+
+                            // Redraw preview rows using XML schema
+                            let new_rows_html = '';
+                            xmlFields.forEach(function(f, idx) {
+                                const matchIdx = headerRow.findIndex(name => name.trim() === f.colName);
+                                const statusStr = matchIdx !== -1 
+                                    ? '<span style="color:green;font-weight:bold;">Matched (Col ' + matchIdx + ')</span>'
+                                    : '<span style="color:orange;font-weight:bold;">Missing (Will write empty)</span>';
+                                
+                                new_rows_html += '<tr>' +
+                                    '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + f.colName + '</td>' +
+                                    '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px;">' + f.clientType + '</td>' +
+                                    '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:11px;">' + statusStr + '</td>' +
+                                    '</tr>';
+                            });
+
+                            layero.find('#bytes_columns_thead').html('<tr>' +
+                                '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;font-size:12px;">XML Field Name</th>' +
+                                '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;font-size:12px;">Client Type</th>' +
+                                '<th style="padding:8px;background:#f5f5f5;text-align:left;border-bottom:2px solid #ddd;font-size:12px;">Match Status</th>' +
+                                '</tr>');
+                            layero.find('#bytes_columns_tbody').html(new_rows_html);
+
+                        } catch (err) {
+                            layer.msg('Error parsing schema XML: ' + err.message, { icon: 2 });
+                            layero.find('#schema_xml_status').text('Error loading XML: ' + err.message);
+                            xmlFields = null;
+                        }
+                    };
+                    reader.readAsText(file);
+                });
+            },
+            yes: function(index) {
+                const skipSecondRow = $('#bytes_skip_second_row').is(':checked');
+
+                if (xmlFields) {
+                    // Reorder columns to align with XML fields
+                    const reorderedTable = [];
+                    for (let r = 0; r < csv_table.length; r++) {
+                        reorderedTable.push([]);
+                    }
+
+                    xmlFields.forEach(function(f) {
+                        const txtColIdx = headerRow.findIndex(name => name.trim() === f.colName);
+                        if (txtColIdx === -1) {
+                            for (let r = 0; r < csv_table.length; r++) {
+                                reorderedTable[r].push(r === 0 ? f.colName : '');
+                            }
+                        } else {
+                            for (let r = 0; r < csv_table.length; r++) {
+                                reorderedTable[r].push(csv_table[r][txtColIdx]);
+                            }
+                        }
+                    });
+
+                    const columnDefs = xmlFields.map(function(f) {
+                        return {
+                            fieldType: f.fieldType,
+                            dataType: f.dataType,
+                            count: f.count,
+                            post: f.post
+                        };
+                    });
+
+                    layer.close(index);
+                    that._execute_bytes_export(data, reorderedTable, {
+                        columnDefs: columnDefs,
+                        skipSecondRow: skipSecondRow
+                    });
+                } else {
+                    // Normal export using auto-detected/selected types
+                    const columnTypes = [];
+                    for (let c = 0; c < headerRow.length; c++) {
+                        const selectedName = $('.bytes_col_type[data-col="' + c + '"]').val();
+                        columnTypes.push(csvBytesConverter.parseTypeName(selectedName));
+                    }
+
+                    layer.close(index);
+                    that._execute_bytes_export(data, csv_table, {
+                        columnTypes: columnTypes,
+                        skipSecondRow: skipSecondRow
+                    });
+                }
             }
         });
     },
 
     /**
-     * Execute .bytes export with given column types
+     * Parse cvs.xml schema for a given table name
      */
-    _execute_bytes_export: function(data, csv_table, columnTypes) {
+    _parse_schema_xml: function(xmlText, tableName) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+        
+        const parserError = xmlDoc.getElementsByTagName('parsererror');
+        if (parserError.length > 0) {
+            throw new Error('Invalid XML file format.');
+        }
+        
+        const structs = xmlDoc.getElementsByTagName('PGCVSStruct');
+        let structNode = null;
+        for (let i = 0; i < structs.length; i++) {
+            const tNode = structs[i].getElementsByTagName('TableName')[0] || structs[i].getElementsByTagName('Name')[0];
+            if (tNode) {
+                const tText = tNode.textContent.trim();
+                if (tText === tableName || tText.indexOf(tableName + '|') === 0) {
+                    structNode = structs[i];
+                    break;
+                }
+            }
+        }
+        
+        if (!structNode) {
+            throw new Error("Table struct for '" + tableName + "' not found in XML.");
+        }
+        
+        const fieldNodes = structNode.getElementsByTagName('PGCVSField');
+        const fields = [];
+        
+        for (let i = 0; i < fieldNodes.length; i++) {
+            const fNode = fieldNodes[i];
+            
+            const serverOnlyNode = fNode.getElementsByTagName('ServerOnly')[0];
+            const serverOnly = serverOnlyNode ? serverOnlyNode.textContent.trim() === 'true' : false;
+            if (serverOnly) continue;
+            
+            const nameNode = fNode.getElementsByTagName('Name')[0];
+            const name = nameNode ? nameNode.textContent.trim() : '';
+            
+            const colNameNode = fNode.getElementsByTagName('ColNameInExcel')[0];
+            const colName = colNameNode ? colNameNode.textContent.trim() : name;
+            
+            const typeNode = fNode.getElementsByTagName('ClientType')[0] || fNode.getElementsByTagName('Type')[0];
+            let clientType = typeNode ? typeNode.textContent.trim() : 'string';
+            
+            // Resolve HTML entities if any left
+            clientType = clientType.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+            
+            let fieldType = csvBytesConverter.EFieldType.EValue;
+            let dataType = csvBytesConverter.EDataType.STRING;
+            let count = 2;
+            let baseType = clientType;
+            
+            if (clientType.indexOf('vector<') === 0) {
+                fieldType = csvBytesConverter.EFieldType.EArray;
+                if (clientType.indexOf('Sequence<') !== -1) {
+                    fieldType = csvBytesConverter.EFieldType.ESeqList;
+                    const match = clientType.match(/Sequence<(.*?),\s*(\d+)>/);
+                    if (match) {
+                        baseType = match[1];
+                        count = parseInt(match[2], 10);
+                    }
+                } else {
+                    baseType = clientType.substring(7, clientType.length - 1);
+                }
+            } else if (clientType.indexOf('Sequence<') === 0) {
+                fieldType = csvBytesConverter.EFieldType.ESeq;
+                const match = clientType.match(/Sequence<(.*?),\s*(\d+)>/);
+                if (match) {
+                    baseType = match[1];
+                    count = parseInt(match[2], 10);
+                }
+            }
+            
+            dataType = csvBytesConverter.parseTypeName(baseType);
+            const post = csvBytesConverter.getPostSuffix(dataType);
+            
+            fields.push({
+                name: name,
+                colName: colName,
+                clientType: clientType,
+                fieldType: fieldType,
+                dataType: dataType,
+                count: count,
+                post: post
+            });
+        }
+        
+        return fields;
+    },
+
+    /**
+     * Execute .bytes export with given options
+     */
+    _execute_bytes_export: function(data, csv_table, options) {
         const that = this;
 
         try {
             const saveT = bt.load('Generating .bytes file...');
 
             const bytesData = csvBytesConverter.convertTableToBytes(csv_table, {
-                columnTypes: columnTypes
+                columnTypes: options.columnTypes,
+                columnDefs: options.columnDefs,
+                skipSecondRow: options.skipSecondRow
             });
 
             // Build target path
